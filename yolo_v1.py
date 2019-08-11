@@ -75,8 +75,8 @@ def modify_data(data_dir, label_file):
             grid_x = (x-1)//32     # input dim: 224, output: 7    =>  224/7=32
             grid_y = (y-1)//32
             confidence = label[0]
-            relative_x = 1 if x((x+1)%32)/32
-            relative_y = ((y+1)%32)/32
+            relative_x = (((x-1)%32)+1)/32
+            relative_y = (((y-1)%32)+1)/32
             relative_w = label[3]/224
             relative_h = label[4]/224
             new_label = np.zeros(15)
@@ -396,9 +396,6 @@ def yolo_v1_model(train_x, train_y, test_x, learning_rate=0.001, num_epoch=100, 
         print(predict_classes)
         mask = sess.run(confidence_mask_coord, {Y:train_y})
         coor = sess.run(current_coord, {Y:train_y})
-        print(mask[0])
-        print(coor[0])
-    print(train_y[0])
     return parameters
 
 
@@ -411,7 +408,7 @@ if __name__ == '__main__':
     test_dir = argv[4]
     if opt == '-tr':
         train_x, train_y = modify_data(train_data_dir, label_file)
-        #train_x = train_x/255
+        train_x = train_x/255
         test_x = read_img(test_dir)
-        #test_x = test_x/255
-        learned_parameter = yolo_v1_model(train_x, train_y, test_x, minibatch_size=64, num_epoch=1)
+        test_x = test_x/255
+        learned_parameter = yolo_v1_model(train_x, train_y, test_x, minibatch_size=34, num_epoch=100)
