@@ -59,7 +59,7 @@ def modify_data(data_dir, label_file):
         for line in lines:
             line_data = line.strip().split('\t')
             id = line_data[0]
-            label_by_id[id].append(list(map(int, line_data[1:]))) # format: id, confidence, x, y, w, h, class*10
+            label_by_id[id].append(list(map(float, line_data[1:]))) # format: id, confidence, x, y, w, h, class*10
 
     img_by_id = {}
     for img_id in label_by_id:
@@ -82,7 +82,7 @@ def modify_data(data_dir, label_file):
             new_label = np.zeros(15)
             new_label[:5] = [confidence, relative_x, relative_y, relative_w, relative_h]
             new_label[5:] = label[5:]
-            output[grid_y, grid_x, :] = new_label  # format: confidence, x, y, w, h, class*10
+            output[int(grid_y), int(grid_x), :] = new_label  # format: confidence, x, y, w, h, class*10
         Y.append(output)
         X.append(img_by_id[id])
 
@@ -411,4 +411,4 @@ if __name__ == '__main__':
         train_x = train_x/255
         test_x = read_img(test_dir)
         test_x = test_x/255
-        learned_parameter = yolo_v1_model(train_x, train_y, test_x, minibatch_size=34, num_epoch=100)
+        learned_parameter = yolo_v1_model(train_x, train_y, test_x, minibatch_size=34, num_epoch=400)
