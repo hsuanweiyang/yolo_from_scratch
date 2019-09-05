@@ -293,11 +293,21 @@ def random_mini_batches(X, Y, minibatch_size=64, seed=1):
 
 def filter_confidence(predict_confidence, threshold=.5):
     filter_mask = predict_confidence > threshold
-    filter_mask = tf.cast(filter_mask, tf.float32)
     return predict_confidence * filter_mask, filter_mask
 
 
-def yolo_model(train_x, train_y, test_x, lr_rate=0.001, num_epoch=1, minibatch_size=64):
+def transform_predict_result(predict_result):
+    filtered_confidence, mask = filter_confidence(predict_result[..., 0])
+    indices = tf.where(mask)
+    extracted_output = tf.gather_nd(predict_result, indices)
+    return extracted_output
+
+
+def draw_bouning_boxes(img, label):
+    return 0
+
+
+def yolo_model(train_x, train_y, test_x, lr_rate=0.001, num_epoch=500, minibatch_size=32):
     (num_sample, in_h, in_w, in_c) = train_x.shape
     (out_h, out_w, out_c) = train_y[0].shape
     lambda_coordinate = 5.0
@@ -361,8 +371,10 @@ if __name__ == '__main__':
     test_data_dir = argv[3]
     train_x, train_y = raw_to_train(train_data_dir, label_file_dir)
     test_id, test_x = read_img_test(test_data_dir)
-    learned_parameters = yolo_model(train_x, train_y, test_x)
+    #learned_parameters = yolo_model(train_x, train_y, test_x)
     #print(predict(learned_parameters, test_x))
+    with tf.Session() as sess:
+        print(sess.run(transform_predict_result(train_y[0])))
     '''
     true = train_y[0:2]
     pred = (true+1) * (-2)
