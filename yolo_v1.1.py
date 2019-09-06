@@ -1,11 +1,9 @@
 import tensorflow as tf
 import numpy as np
-import pandas as pd
 import cv2
 from sys import argv
 import os
 from collections import defaultdict
-import math
 
 
 class_num = 10
@@ -166,49 +164,6 @@ def iou_train(Z_out, Y):
     return iou
 
 
-def cost_detail(Z_out, Y, lambda_coord, lambda_noobj):
-    # coordinate loss
-    true_confidence_mask = Y[..., 0]
-    predicted_x_masked = true_confidence_mask * Z_out[..., 1]
-    predicted_y_masked = true_confidence_mask * Z_out[..., 2]
-    coordinate_x_loss = tf.reduce_sum(tf.square(predicted_x_masked-Y[..., 1]))
-    coordinate_y_loss = tf.reduce_sum(tf.square(predicted_y_masked-Y[..., 2]))
-    coordinate_loss = lambda_coord * (coordinate_x_loss + coordinate_y_loss)
-
-    # size loss
-    predicted_w_masked_sqrt = tf.sqrt(true_confidence_mask * Z_out[..., 3])
-    predicted_w_masked_without_nan = tf.where(tf.is_nan(predicted_w_masked_sqrt), tf.zeros_like(predicted_w_masked_sqrt),
-                                              predicted_w_masked_sqrt)
-    predicted_h_masked_sqrt = tf.sqrt(true_confidence_mask * Z_out[..., 4])
-    predicted_h_masked_without_nan = tf.where(tf.is_nan(predicted_h_masked_sqrt), tf.zeros_like(predicted_h_masked_sqrt),
-                                              predicted_h_masked_sqrt)
-
-    w_sqrt_loss = tf.reduce_sum(tf.square(predicted_w_masked_without_nan - tf.sqrt(Y[..., 3])))
-    h_sqrt_loss = tf.reduce_sum(tf.square(predicted_h_masked_without_nan - tf.sqrt(Y[..., 4])))
-    size_loss = lambda_coord * (w_sqrt_loss + h_sqrt_loss)
-
-    # classes loss
-    mask_shape = tf.shape(true_confidence_mask)
-    true_confidence_mask_for_class = tf.reshape(true_confidence_mask, [mask_shape[0], mask_shape[1], mask_shape[2], 1])
-    predicted_class_masked = true_confidence_mask_for_class * Z_out[..., 5:]
-    class_loss = tf.reduce_sum(tf.square(predicted_class_masked-Y[..., 5:]))
-
-    # confidence loss with object
-    iou = iou_train(Z_out, Y)
-    confidence = iou * Z_out[..., 0]
-    confidence_loss_object_with_nans = tf.square(Y[..., 0] - confidence)
-    confidence_loss_object_without_nans = tf.where(tf.is_nan(confidence_loss_object_with_nans),      # nan value would cause the sum function to return nan
-                                                   tf.zeros_like(confidence_loss_object_with_nans),
-                                                   confidence_loss_object_with_nans)
-    confidence_loss_object_without_nans = tf.reduce_sum(confidence_loss_object_without_nans)
-
-    # confidence loss without object
-    noobj_mask = tf.ones_like(true_confidence_mask)-true_confidence_mask
-    confidence_loss_noobj = lambda_noobj * tf.reduce_sum(tf.square(noobj_mask * Z_out[..., 0]))
-
-    return [coordinate_loss, class_loss, size_loss, confidence_loss_object_without_nans, confidence_loss_noobj]
-
-
 def compute_cost(Z_out, Y, lambda_coord, lambda_noobj):
     # coordinate loss
     true_confidence_mask = Y[..., 0]
@@ -260,9 +215,23 @@ def compute_simple_cost(Z_out, Y, lambda_obj, lambda_noobj):
     true_mask = tf.reshape(true_mask, [true_mask_shape[0], true_mask_shape[1], true_mask_shape[2], 1])
     nobj_mask = 1 - true_mask
 
+    # sqrt size loss
+    Y_w = Y[..., 3]
+    Z_out_w = Z_out[..., 3]
+    w_diff_square = tf.reduce_sum(tf.square(Y_w-Z_out_w) * tf.squeeze(true_mask))
+    Y_h = Y[..., 4]
+    Z_out_h = Z_out[..., 4]
+    h_diff_square = tf.reduce_sum(tf.square(Y_h-Z_out_h) * tf.squeeze(true_mask))
+    # get the distance between true and predicted result, eliminate the effect causing by negative value
+    Z_w_modifiy_negative = tf.where(Z_out_w < 0, Y_w-Z_out_w, Z_out_w)
+    Z_h_modifiy_negative = tf.where(Z_out_h < 0, Y_h-Z_out_h, Z_out_h)
+    size_loss = tf.reduce_sum(tf.square(tf.sqrt(Y_w)-tf.sqrt(tf.abs(Z_w_modifiy_negative))) +
+                              tf.square(tf.sqrt(Y_h)-tf.sqrt(tf.abs(Z_h_modifiy_negative))))
+
     loss_all = tf.square(Y - Z_out)
-    loss_with_obj = lambda_obj * tf.reduce_sum(loss_all * true_mask)
-    loss_without_obj = lambda_noobj * tf.reduce_sum(loss_all * nobj_mask)
+    loss_with_obj = lambda_obj * (tf.reduce_sum(loss_all * true_mask) - w_diff_square - h_diff_square + size_loss)
+    loss_without_obj = lambda_noobj * tf.reduce_sum(loss_all[..., 0] * tf.squeeze(nobj_mask))
+
     return loss_with_obj + loss_without_obj
 
 
@@ -300,14 +269,32 @@ def transform_predict_result(predict_result):
     filtered_confidence, mask = filter_confidence(predict_result[..., 0])
     indices = tf.where(mask)
     extracted_output = tf.gather_nd(predict_result, indices)
-    return extracted_output
+    x = (extracted_output[..., 1] + tf.cast(indices[..., 1], tf.float32)) * img_size['w']/output_grid_num
+    y = (extracted_output[..., 2] + tf.cast(indices[..., 0], tf.float32)) * img_size['h']/output_grid_num
+    w = extracted_output[..., 3] * img_size['w']
+    h = extracted_output[..., 4] * img_size['h']
+
+    predict_class = tf.cast(tf.argmax(extracted_output[..., 5:], axis=-1), tf.float32)
+    transformed_result = tf.stack([extracted_output[..., 0], x, y, w, h, predict_class], axis=-1)
+    return transformed_result
 
 
-def draw_bouning_boxes(img, label):
+def draw_bouning_boxes(img, label_info):
+    img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    for each in label_info:
+        (confidence, x, y, w, h, label) = each
+        x_min = int(x - w/2)
+        x_max = int(x + w/2)
+        y_min = int(y - h/2)
+        y_max = int(y + h/2)
+        cv2.rectangle(img, (x_min, y_min), (x_max, y_max), (0, 255, 0), 1)
+        cv2.putText(img, '{0}%:{1}'.format(confidence*100, label), (x_min, y_min-5), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4, (0, 255, 0), 1)
+    cv2.imwrite('test.jpg', img)
     return 0
 
 
-def yolo_model(train_x, train_y, test_x, lr_rate=0.001, num_epoch=500, minibatch_size=32):
+def yolo_model(train_x, train_y, test_x, lr_rate=0.001, num_epoch=10, minibatch_size=32):
     (num_sample, in_h, in_w, in_c) = train_x.shape
     (out_h, out_w, out_c) = train_y[0].shape
     lambda_coordinate = 5.0
@@ -318,22 +305,13 @@ def yolo_model(train_x, train_y, test_x, lr_rate=0.001, num_epoch=500, minibatch
     is_training = tf.placeholder(tf.bool, name='is_training')
 
     forward_out = forward_propagation(X, parameters, is_training)
-    loss = compute_cost(forward_out, Y, lambda_coordinate, lambda_noobject)
-    loss_info = cost_detail(forward_out, Y, lambda_coordinate, lambda_noobject)
+    #loss = compute_cost(forward_out, Y, lambda_coordinate, lambda_noobject)
     simple_loss = compute_simple_cost(forward_out, Y, lambda_coordinate, lambda_noobject)
-
-    #filtered_result = filter_confidence(forward_out[..., 0])
 
     with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS)):
         optimizer = tf.train.AdamOptimizer(learning_rate=lr_rate).minimize(simple_loss)
-        '''
-        # clip gradient for preventing explode
-        optimizer = tf.train.GradientDescentOptimizer(learning_rate=lr_rate)
-        grads = optimizer.compute_gradients(loss)
-        cliped_grad = [(tf.clip_by_value(grad, -1.0, 1.0), var) for grad, var in grads]
-        optimizer = optimizer.apply_gradients(cliped_grad)
-        '''
     init = tf.global_variables_initializer()
+    saver = tf.train.Saver(max_to_keep=5)
 
     with tf.Session().as_default() as sess:
         init.run()
@@ -344,25 +322,15 @@ def yolo_model(train_x, train_y, test_x, lr_rate=0.001, num_epoch=500, minibatch
             for batch in minibatches:
                 (mini_x, mini_y) = batch
                 _, mini_cost = sess.run([optimizer, simple_loss], {X: mini_x, Y: mini_y, is_training: True})
-                '''
-                _, mini_cost, loss_detail, output, grad = sess.run([optimizer, loss, loss_info, forward_out, grads], {X: mini_x, Y: mini_y, is_training: True})
-                print('---')
-                print(loss_detail)
-                print(grad)
-                print(sess.run(parameters['w1'][0][0]))
-                '''
                 epoch_cost += mini_cost/num_minibatches
             if (epoch + 1) % 1 == 0:
                  print('loss epoch-{0}:{1}'.format(epoch + 1, epoch_cost))
-        predict_result = sess.run(forward_out, {X: test_x, is_training: False})
-        predict_confidence, mask = sess.run(filter_confidence(predict_result[..., 0]))
-        predict_class = sess.run(tf.argmax(predict_result[..., 5:], axis=-1) * mask)
-        for confidence in predict_confidence:
-            print(confidence)
-        for label in predict_class:
-            print(label)
-    return parameters
+            if (epoch + 1) % 100 == 0:
+                saver.save(sess, 'yolo_model', global_step=epoch+1)
 
+        predict_result = sess.run(forward_out, {X: test_x, is_training: False})
+        sess.run(transform_predict_result(predict_result))
+    return parameters
 
 
 if __name__ == '__main__':
@@ -371,16 +339,4 @@ if __name__ == '__main__':
     test_data_dir = argv[3]
     train_x, train_y = raw_to_train(train_data_dir, label_file_dir)
     test_id, test_x = read_img_test(test_data_dir)
-    #learned_parameters = yolo_model(train_x, train_y, test_x)
-    #print(predict(learned_parameters, test_x))
-    with tf.Session() as sess:
-        print(sess.run(transform_predict_result(train_y[0])))
-    '''
-    true = train_y[0:2]
-    pred = (true+1) * (-2)
-    with tf.Session() as sess:
-
-        true = sess.run(tf.convert_to_tensor(true, dtype=tf.float32))
-        pred = sess.run(tf.convert_to_tensor(pred, dtype=tf.float32))
-        print(sess.run(compute_cost(pred, true, 1, 1)))
-    '''
+    learned_parameters = yolo_model(train_x, train_y, test_x)
